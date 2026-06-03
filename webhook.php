@@ -1,90 +1,142 @@
 <?php
-$users = json_decode(file_get_contents("users.json"), true) ?? [];
+$usersFile = __DIR__ . '/users.json';
+$TOKEN = getenv('TELEGRAM_TOKEN') ?: '';
+$ADMIN_ID = (int)(getenv('ADMIN_ID') ?: 1378641125);
 
-$TOKEN = "8416517417:AAFsW6Wffa6V8oFGIqRmRP642B-cOgi0L1M";
-$ADMIN_ID = 1378641125; // твой TG ID
+function loadUsers(string $file): array {
+    if (!file_exists($file)) {
+        return [];
+    }
+    $raw = file_get_contents($file);
+    $data = json_decode($raw ?: '[]', true);
+    return is_array($data) ? $data : [];
+}
 
-$data = json_decode(file_get_contents("php://input"), true);
+function saveUsers(string $file, array $users): void {
+    file_put_contents($file, json_encode($users, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+}
 
-function sendMessage($chat_id, $text) {
+function tgRequest(string $method, array $params): array {
     global $TOKEN;
-    file_get_contents(
-        "https://api.telegram.org/bot$TOKEN/sendMessage?" .
-        http_build_query([
-            "chat_id" => $chat_id,
-            "text" => $text
-        ])
-    );
+    if ($TOKEN === '') {
+        return ['ok' => false, 'error' => 'Missing TELEGRAM_TOKEN'];
+    }
+
+    $ch = curl_init("https://api.telegram.org/bot{$TOKEN}/{$method}");
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => http_build_query($params),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 7,
+    ]);
+
+    $response = curl_exec($ch);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false) {
+        return ['ok' => false, 'error' => $error ?: 'Request failed'];
+    }
+
+    $decoded = json_decode($response, true);
+    return is_array($decoded) ? $decoded : ['ok' => false, 'error' => 'Invalid JSON response'];
 }
 
-if (!$data) {
-    exit;
+function sendMessage(int|string $chat_id, string $text): void {
+    tgRequest('sendMessage', [
+        'chat_id' => $chat_id,
+        'text' => $text,
+    ]);
 }
 
-$message = $data["message"] ?? null;
-
-if (!$message) {
-    exit;
+$data = json_decode(file_get_contents('php://input') ?: '', true);
+if (!is_array($data)) {
+    http_response_code(200);
+    exit('ok');
 }
 
-$chat_id = $message["chat"]["id"];
-$text = trim($message["text"] ?? "");
-
-if ($text === "/start") {
-    sendMessage($chat_id,
-        "Привет!  👋\n\n" .
-        "1 — заявка на вход\n" .
-        "2 — рест\n" .
-        "3 — заявка рекрута"
-    );
-    exit;
+$message = $data['message'] ?? null;
+if (!is_array($message)) {
+    http_response_code(200);
+    exit('ok');
 }
 
-// === ЗАЯВКА НА ВХОД ===
+$chat_id = $message['chat']['id'] ?? null;
+$text = trim((string)($message['text'] ?? ''));
+$from = $message['from'] ?? [];
+$username = $from['username'] ?? 'Нет username';
+$firstName = $from['first_name'] ?? '';
 
-if ($text === "1") {
-    $users[$chat_id]["step"] = "join_age";
-    sendMessage($chat_id, "Сколько тебе лет? ");
-    file_put_contents("users.json", json_encode($users));
-    exit;
+if ($chat_id === null) {
+    http_response_code(200);
+    exit('ok');
 }
 
-if (($users[$chat_id]["step"] ?? "") === "join_age") {
-    $users[$chat_id]["age"] = $text;
-    $users[$chat_id]["step"] = "join_reason";
-    sendMessage($chat_id, "Почему хочешь вступить?");
-    file_put_contents("users.json", json_encode($users));
-    exit;
+$users = loadUsers($usersFile);
+$chatKey = (string)$chat_id;
+$step = $users[$chatKey]['step'] ?? null;
+
+if ($text === '/start') {
+    unset($users[$chatKey]);
+    saveUsers($usersFile, $users);
+    sendMessage($chat_id, "Привет! 👋\n\n1 — заявка на вход\n2 — рест\n3 — заявка рекрута");
+    http_response_code(200);
+    exit('ok');
 }
 
-if (($users[$chat_id]["step"] ?? "") === "join_reason") {
-    $age = $users[$chat_id]["age"];
+if ($text === '1') {
+    $users[$chatKey] = [
+        'step' => 'join_age',
+        'type' => 'join',
+        'username' => $username,
+        'first_name' => $firstName,
+    ];
+    saveUsers($usersFile, $users);
+    sendMessage($chat_id, 'Сколько тебе лет?');
+    http_response_code(200);
+    exit('ok');
+}
 
-    $msg =
-        "📩 Новая заявка на вход\n\n" . 
-        "🆔 ID:  $chat_id\n" . 
-        "🎂 Возраст: $age\n" .
-        "💬 Причина: $text";
+if ($step === 'join_age') {
+    $users[$chatKey]['age'] = $text;
+    $users[$chatKey]['step'] = 'join_reason';
+    saveUsers($usersFile, $users);
+    sendMessage($chat_id, 'Почему хочешь вступить?');
+    http_response_code(200);
+    exit('ok');
+}
+
+if ($step === 'join_reason') {
+    $age = $users[$chatKey]['age'] ?? '';
+    $msg = "📩 Новая заявка на вход\n\n" .
+        "🆔 ID: {$chat_id}\n" .
+        "👤 Имя: {$firstName}\n" .
+        "🔗 Username: @{$username}\n" .
+        "🎂 Возраст: {$age}\n" .
+        "💬 Причина: {$text}";
 
     sendMessage($ADMIN_ID, $msg);
-    sendMessage($chat_id, "✅ Заявка отправлена администрации");
+    sendMessage($chat_id, '✅ Заявка отправлена администрации');
 
-    unset($users[$chat_id]);
-    file_put_contents("users.json", json_encode($users));
-    exit;
+    unset($users[$chatKey]);
+    saveUsers($usersFile, $users);
+    http_response_code(200);
+    exit('ok');
 }
 
-// === REST ===
-if ($text === "2") {
-    sendMessage($chat_id, "REST команда получена.");
-    exit;
+if ($text === '2') {
+    sendMessage($chat_id, "🛌 Рест принят. Отдыхай.");
+    http_response_code(200);
+    exit('ok');
 }
 
-// === ЗАЯВКА РЕКРУТА ===
-if ($text === "3") {
-    sendMessage($chat_id, "Заявка рекрута получена.");
-    exit;
+if ($text === '3') {
+    sendMessage($chat_id, "📝 Заявка рекрута получена.");
+    http_response_code(200);
+    exit('ok');
 }
 
-file_put_contents("users. json", json_encode($users));
-?>
+sendMessage($chat_id, 'Используй кнопки/команды меню.');
+http_response_code(200);
+exit('ok');
